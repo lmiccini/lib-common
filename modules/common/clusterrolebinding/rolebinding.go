@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package clusterrole
+package clusterrolebinding
 
 import (
 	"context"
@@ -31,34 +31,37 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-// NewClusterRole returns an initialized ClusterRole
-func NewClusterRole(
-	clusterrole *rbacv1.ClusterRole,
+// NewRoleBinding returns an initialized RoleBinding
+func NewClusterRoleBinding(
+	clusterroleBinding *rbacv1.ClusterRoleBinding,
 	timeout time.Duration,
-) *ClusterRole {
-	return &ClusterRole{
-		clusterrole: clusterrole,
-		timeout:     timeout,
+) *ClusterRoleBinding {
+	return &ClusterRoleBinding{
+		clusterroleBinding: clusterroleBinding,
+		timeout:            timeout,
 	}
 }
 
-// CreateOrPatch - creates or patches a role, reconciles after Xs if object won't exist.
-func (r *ClusterRole) CreateOrPatch(
+// CreateOrPatch - creates or patches a role binding, reconciles after Xs if object won't exist.
+func (r *ClusterRoleBinding) CreateOrPatch(
 	ctx context.Context,
 	h *helper.Helper,
 ) (ctrl.Result, error) {
-	clusterrole := &rbacv1.ClusterRole{
+	rb := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.clusterrole.Name,
-			Namespace: r.clusterrole.Namespace,
+			Name:      r.clusterroleBinding.Name,
+			Namespace: r.clusterroleBinding.Namespace,
 		},
 	}
 
-	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), clusterrole, func() error {
-		clusterrole.Labels = util.MergeStringMaps(clusterrole.Labels, r.clusterrole.Labels)
-		clusterrole.Annotations = util.MergeStringMaps(clusterrole.Labels, r.clusterrole.Annotations)
-		clusterrole.Rules = r.clusterrole.Rules
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), clusterrole, h.GetScheme())
+	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), rb, func() error {
+		rb.Labels = util.MergeStringMaps(rb.Labels, r.clusterroleBinding.Labels)
+		rb.Annotations = util.MergeStringMaps(rb.Annotations, r.clusterroleBinding.Annotations)
+
+		rb.RoleRef = r.clusterroleBinding.RoleRef
+		rb.Subjects = r.clusterroleBinding.Subjects
+
+		err := controllerutil.SetControllerReference(h.GetBeforeObject(), rb, h.GetScheme())
 		if err != nil {
 			return err
 		}
@@ -67,31 +70,31 @@ func (r *ClusterRole) CreateOrPatch(
 	})
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
-			h.GetLogger().Info(fmt.Sprintf("ClusterRole %s not found, reconcile in %s", clusterrole.Name, r.timeout))
+			h.GetLogger().Info(fmt.Sprintf("ClusterRoleBinding %s not found, reconcile in %s", rb.Name, r.timeout))
 			return ctrl.Result{RequeueAfter: r.timeout}, nil
 		}
 		return ctrl.Result{}, util.WrapErrorForObject(
-			fmt.Sprintf("Error creating clusterrole %s", clusterrole.Name),
-			clusterrole,
+			fmt.Sprintf("Error creating clusterrole binding %s", rb.Name),
+			rb,
 			err,
 		)
 	}
 	if op != controllerutil.OperationResultNone {
-		h.GetLogger().Info(fmt.Sprintf("ClusterRole %s - %s", clusterrole.Name, op))
+		h.GetLogger().Info(fmt.Sprintf("ClusterRoleBinding %s - %s", rb.Name, op))
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// Delete - delete a role
-func (r *ClusterRole) Delete(
+// Delete - delete a RoleBinding
+func (r *ClusterRoleBinding) Delete(
 	ctx context.Context,
 	h *helper.Helper,
 ) error {
 
-	err := h.GetClient().Delete(ctx, r.clusterrole)
+	err := h.GetClient().Delete(ctx, r.clusterroleBinding)
 	if err != nil && !k8s_errors.IsNotFound(err) {
-		err = fmt.Errorf("Error deleting clusterrole %s: %w", r.clusterrole.Name, err)
+		err = fmt.Errorf("Error deleting clusterroleBinding %s: %w", r.clusterroleBinding.Name, err)
 		return err
 	}
 

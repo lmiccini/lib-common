@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	common_clusterrole "github.com/openstack-k8s-operators/lib-common/modules/common/clusterrole"
+	common_clusterrolebinding "github.com/openstack-k8s-operators/lib-common/modules/common/clusterrolebinding"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	common_role "github.com/openstack-k8s-operators/lib-common/modules/common/role"
@@ -93,6 +95,38 @@ func ReconcileRbac(ctx context.Context, h *helper.Helper, instance Reconciler, r
 		condition.RoleReadyCondition,
 		condition.RoleReadyMessage))
 
+	// ClusterRole
+	clusterrole := common_clusterrole.NewClusterRole(
+		&rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      instance.RbacResourceName() + "-clusterrole",
+				Namespace: instance.RbacNamespace(),
+			},
+			Rules: rules,
+		},
+		time.Duration(10),
+	)
+	roleResult, err = clusterrole.CreateOrPatch(ctx, h)
+	if err != nil {
+		instance.RbacConditionsSet(condition.FalseCondition(
+			condition.RoleReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.RoleReadyErrorMessage,
+			err.Error()))
+		return roleResult, err
+	} else if (roleResult != ctrl.Result{}) {
+		instance.RbacConditionsSet(condition.FalseCondition(
+			condition.RoleReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.RoleCreatingMessage))
+		return roleResult, nil
+	}
+	instance.RbacConditionsSet(condition.TrueCondition(
+		condition.RoleReadyCondition,
+		condition.RoleReadyMessage))
+
 	// RoleBinding
 	rolebinding := common_rolebinding.NewRoleBinding(
 		&rbacv1.RoleBinding{
@@ -116,6 +150,49 @@ func ReconcileRbac(ctx context.Context, h *helper.Helper, instance Reconciler, r
 		time.Duration(10),
 	)
 	roleBindingResult, err := rolebinding.CreateOrPatch(ctx, h)
+	if err != nil {
+		instance.RbacConditionsSet(condition.FalseCondition(
+			condition.RoleBindingReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.RoleBindingReadyErrorMessage,
+			err.Error()))
+		return roleBindingResult, err
+	} else if (roleBindingResult != ctrl.Result{}) {
+		instance.RbacConditionsSet(condition.FalseCondition(
+			condition.RoleBindingReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.RoleBindingCreatingMessage))
+		return roleBindingResult, nil
+	}
+	instance.RbacConditionsSet(condition.TrueCondition(
+		condition.RoleBindingReadyCondition,
+		condition.RoleBindingReadyMessage))
+
+	// ClusterRoleBinding
+	clusterrolebinding := common_clusterrolebinding.NewClusterRoleBinding(
+		&rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      instance.RbacResourceName() + "-rolebinding",
+				Namespace: instance.RbacNamespace(),
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     instance.RbacResourceName() + "-clusterrole",
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					Kind:      "ServiceAccount",
+					Name:      instance.RbacResourceName(),
+					Namespace: instance.RbacNamespace(),
+				},
+			},
+		},
+		time.Duration(10),
+	)
+	roleBindingResult, err = clusterrolebinding.CreateOrPatch(ctx, h)
 	if err != nil {
 		instance.RbacConditionsSet(condition.FalseCondition(
 			condition.RoleBindingReadyCondition,
