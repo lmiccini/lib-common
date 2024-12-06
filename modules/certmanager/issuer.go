@@ -42,6 +42,8 @@ const (
 	RootCAIssuerOvnDBLabel = "osp-rootca-issuer-ovn"
 	// RootCAIssuerLibvirtLabel for internal RootCA to issue libvirt TLS Certs
 	RootCAIssuerLibvirtLabel = "osp-rootca-issuer-libvirt"
+	// RootCAIssuerMemcachedLabel for internal RootCA to issue memcached TLS Certs
+	RootCAIssuerMemcachedLabel = "osp-rootca-issuer-memcached"
 	// CertDurationAnnotation on an issuer reflects the duration to be used for certs being issued
 	CertDurationAnnotation = "cert-duration"
 	// CertRenewBeforeAnnotation on an issuer reflects the renewBefore to be used for certs being issued
