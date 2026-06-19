@@ -31,6 +31,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,7 @@ import (
 type Helper struct {
 	client       client.Client
 	kclient      kubernetes.Interface
+	apiReader    client.Reader
 	gvk          schema.GroupVersionKind
 	scheme       *runtime.Scheme
 	beforeObject client.Object
@@ -86,6 +88,41 @@ func (h *Helper) GetClient() client.Client {
 // GetKClient - returns the kclient
 func (h *Helper) GetKClient() kubernetes.Interface {
 	return h.kclient
+}
+
+// SetAPIReader sets an uncached API reader on the helper. Pass
+// mgr.GetAPIReader() from the controller manager to enable direct
+// API server reads that bypass the informer cache.
+func (h *Helper) SetAPIReader(r client.Reader) {
+	h.apiReader = r
+}
+
+// GetAPIReader returns the uncached API reader, or nil if not set.
+func (h *Helper) GetAPIReader() client.Reader {
+	return h.apiReader
+}
+
+// EnsureFresh re-reads obj directly from the API server when op is
+// OperationResultNone and refreshNeeded is true. When CreateOrPatch
+// returns op!=None, the returned object already reflects the server
+// state (fresh), so no extra read is needed. When op==None the object
+// comes from the informer cache, which may be stale — this matters
+// during transport-secret rotation where the parent must see accurate
+// sub-CR conditions before removing the old secret's finalizer.
+//
+// If no APIReader has been set via SetAPIReader, this is a no-op
+// (backwards compatible).
+func (h *Helper) EnsureFresh(ctx context.Context, op controllerutil.OperationResult, obj client.Object, refreshNeeded bool) error {
+	if !refreshNeeded {
+		return nil
+	}
+	if op != controllerutil.OperationResultNone {
+		return nil
+	}
+	if h.apiReader == nil {
+		return nil
+	}
+	return h.apiReader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 }
 
 // GetGKV - returns the GKV of the object
