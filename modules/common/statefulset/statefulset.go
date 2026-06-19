@@ -66,39 +66,65 @@ func (s *StatefulSet) CreateOrPatch(
 		statefulset.Annotations = util.MergeStringMaps(statefulset.Annotations, s.statefulset.Annotations)
 
 		// Selector and VolumeClaimTemplates are immutable after creation.
-		// Preserve the existing values so the full Spec overwrite below
-		// does not trigger an API error on update.
 		if !statefulset.CreationTimestamp.IsZero() {
 			s.statefulset.Spec.Selector = statefulset.Spec.Selector
 			s.statefulset.Spec.VolumeClaimTemplates = statefulset.Spec.VolumeClaimTemplates
 		}
 
-		// Save existing containers before overwriting the Spec so we can
-		// merge them below to preserve server-defaulted fields.
-		existingContainers := statefulset.Spec.Template.Spec.Containers
-		existingInitContainers := statefulset.Spec.Template.Spec.InitContainers
+		// Save existing state before the full Spec overwrite so we can
+		// restore server-defaulted fields afterward.
+		existingSpec := statefulset.Spec
+		existingPodSpec := statefulset.Spec.Template.Spec
 
-		// Overwrite the entire Spec with the desired state. This ensures
-		// any new Kubernetes fields are picked up automatically without
-		// needing to add individual field copies.
 		statefulset.Spec = s.statefulset.Spec
 
 		pod.SetPullPolicyDefaults(&statefulset.Spec.Template.Spec)
 
-		// Merge containers by name to preserve server-defaulted fields
-		// (e.g. TerminationMessagePath, ImagePullPolicy) and avoid
-		// unnecessary reconcile loops. Falls back to full replacement if
-		// container sets don't match by name.
-		statefulset.Spec.Template.Spec.Containers = existingContainers
-		MergeContainersByName(
-			&statefulset.Spec.Template.Spec.Containers,
-			s.statefulset.Spec.Template.Spec.Containers,
-		)
-		statefulset.Spec.Template.Spec.InitContainers = existingInitContainers
-		MergeContainersByName(
-			&statefulset.Spec.Template.Spec.InitContainers,
-			s.statefulset.Spec.Template.Spec.InitContainers,
-		)
+		// Restore server-defaulted StatefulSet-level fields.
+		if statefulset.Spec.PodManagementPolicy == "" {
+			statefulset.Spec.PodManagementPolicy = existingSpec.PodManagementPolicy
+		}
+		if statefulset.Spec.UpdateStrategy.Type == "" {
+			statefulset.Spec.UpdateStrategy = existingSpec.UpdateStrategy
+		}
+		if statefulset.Spec.RevisionHistoryLimit == nil {
+			statefulset.Spec.RevisionHistoryLimit = existingSpec.RevisionHistoryLimit
+		}
+		if statefulset.Spec.PersistentVolumeClaimRetentionPolicy == nil {
+			statefulset.Spec.PersistentVolumeClaimRetentionPolicy = existingSpec.PersistentVolumeClaimRetentionPolicy
+		}
+
+		// Restore server-defaulted pod-level fields.
+		ps := &statefulset.Spec.Template.Spec
+		if ps.RestartPolicy == "" {
+			ps.RestartPolicy = existingPodSpec.RestartPolicy
+		}
+		if ps.DNSPolicy == "" {
+			ps.DNSPolicy = existingPodSpec.DNSPolicy
+		}
+		if ps.TerminationGracePeriodSeconds == nil {
+			ps.TerminationGracePeriodSeconds = existingPodSpec.TerminationGracePeriodSeconds
+		}
+		if ps.SchedulerName == "" {
+			ps.SchedulerName = existingPodSpec.SchedulerName
+		}
+		if ps.SecurityContext == nil {
+			ps.SecurityContext = existingPodSpec.SecurityContext
+		}
+		// DeprecatedServiceAccount is a server-set alias for ServiceAccountName.
+		ps.DeprecatedServiceAccount = existingPodSpec.DeprecatedServiceAccount
+
+		// Merge containers/initContainers by name to preserve
+		// server-defaulted fields (TerminationMessagePath, etc.).
+		ps.Containers = existingPodSpec.Containers
+		MergeContainersByName(&ps.Containers, s.statefulset.Spec.Template.Spec.Containers)
+		ps.InitContainers = existingPodSpec.InitContainers
+		MergeContainersByName(&ps.InitContainers, s.statefulset.Spec.Template.Spec.InitContainers)
+
+		// Merge volumes by name to preserve server-defaulted fields
+		// (defaultMode, hostPath type).
+		ps.Volumes = existingPodSpec.Volumes
+		MergeVolumesByName(&ps.Volumes, s.statefulset.Spec.Template.Spec.Volumes)
 
 		err := controllerutil.SetControllerReference(h.GetBeforeObject(), statefulset, h.GetScheme())
 		if err != nil {
