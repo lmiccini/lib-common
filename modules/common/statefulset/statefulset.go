@@ -108,10 +108,20 @@ func (s *StatefulSet) CreateOrPatch(
 		h.GetLogger().Info(fmt.Sprintf("StatefulSet %s - %s", statefulset.Name, op))
 	}
 
-	// update the statefulset object of the statefulset type
-	s.statefulset, err = GetStatefulSetWithName(ctx, h, statefulset.GetName(), statefulset.GetNamespace())
-	if err != nil {
-		return ctrl.Result{}, err
+	if op == controllerutil.OperationResultNone {
+		// Re-read from cache to pick up status updates from the
+		// StatefulSet controller (e.g. updated ReadyReplicas).
+		s.statefulset, err = GetStatefulSetWithName(ctx, h, statefulset.GetName(), statefulset.GetNamespace())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
+		// After a create/update the informer cache may still hold the
+		// previous version where Generation == ObservedGeneration. Using
+		// the server-returned object preserves the correct (bumped)
+		// Generation so that callers' readiness checks do not pass on
+		// stale data.
+		s.statefulset = statefulset
 	}
 
 	return ctrl.Result{}, nil
