@@ -19,12 +19,14 @@ package cronjob
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
@@ -52,9 +54,25 @@ func (cj *CronJob) CreateOrPatch(
 	cronjob.ObjectMeta = cj.cronjob.ObjectMeta
 
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), cronjob, func() error {
-		cronjob.Spec = cj.cronjob.Spec
-		pod.SetPullPolicyDefaults(&cronjob.Spec.JobTemplate.Spec.Template.Spec)
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), cronjob, h.GetScheme())
+		pod.SetPullPolicyDefaults(&cj.cronjob.Spec.JobTemplate.Spec.Template.Spec)
+
+		existingJSON, err := json.Marshal(cronjob.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal existing CronJob spec: %w", err)
+		}
+		desiredJSON, err := json.Marshal(cj.cronjob.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal desired CronJob spec: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(existingJSON, desiredJSON, batchv1.CronJobSpec{})
+		if err != nil {
+			return fmt.Errorf("strategic merge CronJob spec: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &cronjob.Spec); err != nil {
+			return fmt.Errorf("unmarshal patched CronJob spec: %w", err)
+		}
+
+		err = controllerutil.SetControllerReference(h.GetBeforeObject(), cronjob, h.GetScheme())
 		if err != nil {
 			return err
 		}

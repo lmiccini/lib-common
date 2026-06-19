@@ -19,6 +19,7 @@ package deployment
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -57,39 +59,34 @@ func (d *Deployment) CreateOrPatch(
 	}
 
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), deployment, func() error {
-		// Deployment selector is immutable so we set this value only if
-		// a new object is going to be created
-		if deployment.CreationTimestamp.IsZero() {
-			deployment.Spec.Selector = d.deployment.Spec.Selector
+		// Deployment selector is immutable after creation; copy
+		// existing into desired so the strategic merge leaves it
+		// untouched on updates.
+		if !deployment.CreationTimestamp.IsZero() {
+			d.deployment.Spec.Selector = deployment.Spec.Selector
 		}
 		deployment.Annotations = util.MergeStringMaps(deployment.Annotations, d.deployment.Annotations)
 		deployment.Labels = util.MergeStringMaps(deployment.Labels, d.deployment.Labels)
 
-		// Save existing containers before overwriting the Template so we
-		// can merge them below to preserve server-defaulted fields.
-		existingContainers := deployment.Spec.Template.Spec.Containers
-		existingInitContainers := deployment.Spec.Template.Spec.InitContainers
+		pod.SetPullPolicyDefaults(&d.deployment.Spec.Template.Spec)
 
-		deployment.Spec.Template = d.deployment.Spec.Template
-		pod.SetPullPolicyDefaults(&deployment.Spec.Template.Spec)
-		deployment.Spec.Replicas = d.deployment.Spec.Replicas
-		deployment.Spec.Strategy = d.deployment.Spec.Strategy
+		existingJSON, err := json.Marshal(deployment.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal existing Deployment spec: %w", err)
+		}
+		desiredJSON, err := json.Marshal(d.deployment.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal desired Deployment spec: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(existingJSON, desiredJSON, appsv1.DeploymentSpec{})
+		if err != nil {
+			return fmt.Errorf("strategic merge Deployment spec: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &deployment.Spec); err != nil {
+			return fmt.Errorf("unmarshal patched Deployment spec: %w", err)
+		}
 
-		// Merge containers by name to preserve server-defaulted fields
-		// (e.g. TerminationMessagePath, ImagePullPolicy) and avoid
-		// unnecessary reconcile loops.
-		deployment.Spec.Template.Spec.Containers = existingContainers
-		pod.MergeContainersByName(
-			&deployment.Spec.Template.Spec.Containers,
-			d.deployment.Spec.Template.Spec.Containers,
-		)
-		deployment.Spec.Template.Spec.InitContainers = existingInitContainers
-		pod.MergeContainersByName(
-			&deployment.Spec.Template.Spec.InitContainers,
-			d.deployment.Spec.Template.Spec.InitContainers,
-		)
-
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), deployment, h.GetScheme())
+		err = controllerutil.SetControllerReference(h.GetBeforeObject(), deployment, h.GetScheme())
 		if err != nil {
 			return err
 		}

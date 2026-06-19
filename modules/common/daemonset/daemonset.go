@@ -19,6 +19,7 @@ package daemonset
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -57,38 +59,34 @@ func (d *DaemonSet) CreateOrPatch(
 	}
 
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), daemonset, func() error {
-		// DaemonSet selector is immutable so we set this value only if
-		// a new object is going to be created
-		if daemonset.CreationTimestamp.IsZero() {
-			daemonset.Spec.Selector = d.daemonset.Spec.Selector
+		// DaemonSet selector is immutable after creation; copy
+		// existing into desired so the strategic merge leaves it
+		// untouched on updates.
+		if !daemonset.CreationTimestamp.IsZero() {
+			d.daemonset.Spec.Selector = daemonset.Spec.Selector
 		}
 		daemonset.Annotations = util.MergeStringMaps(daemonset.Annotations, d.daemonset.Annotations)
 		daemonset.Labels = util.MergeStringMaps(daemonset.Labels, d.daemonset.Labels)
 
-		// Save existing containers before overwriting the Template so we
-		// can merge them below to preserve server-defaulted fields.
-		existingContainers := daemonset.Spec.Template.Spec.Containers
-		existingInitContainers := daemonset.Spec.Template.Spec.InitContainers
+		pod.SetPullPolicyDefaults(&d.daemonset.Spec.Template.Spec)
 
-		daemonset.Spec.Template = d.daemonset.Spec.Template
-		pod.SetPullPolicyDefaults(&daemonset.Spec.Template.Spec)
-		daemonset.Spec.UpdateStrategy = d.daemonset.Spec.UpdateStrategy
+		existingJSON, err := json.Marshal(daemonset.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal existing DaemonSet spec: %w", err)
+		}
+		desiredJSON, err := json.Marshal(d.daemonset.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal desired DaemonSet spec: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(existingJSON, desiredJSON, appsv1.DaemonSetSpec{})
+		if err != nil {
+			return fmt.Errorf("strategic merge DaemonSet spec: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &daemonset.Spec); err != nil {
+			return fmt.Errorf("unmarshal patched DaemonSet spec: %w", err)
+		}
 
-		// Merge containers by name to preserve server-defaulted fields
-		// (e.g. TerminationMessagePath, ImagePullPolicy) and avoid
-		// unnecessary reconcile loops.
-		daemonset.Spec.Template.Spec.Containers = existingContainers
-		pod.MergeContainersByName(
-			&daemonset.Spec.Template.Spec.Containers,
-			d.daemonset.Spec.Template.Spec.Containers,
-		)
-		daemonset.Spec.Template.Spec.InitContainers = existingInitContainers
-		pod.MergeContainersByName(
-			&daemonset.Spec.Template.Spec.InitContainers,
-			d.daemonset.Spec.Template.Spec.InitContainers,
-		)
-
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), daemonset, h.GetScheme())
+		err = controllerutil.SetControllerReference(h.GetBeforeObject(), daemonset, h.GetScheme())
 		if err != nil {
 			return err
 		}
