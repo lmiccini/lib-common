@@ -167,9 +167,11 @@ func (s *StatefulSet) Delete(
 // - the requested replicas in the spec matches the ReadyReplicas of the status
 // - all pods run the current spec (UpdatedReplicas == requested replicas)
 // - both when the Generatation of the object matches the ObservedGeneration of the Status
+// - the rollout is complete (CurrentRevision == UpdateRevision)
 func IsReady(deployment appsv1.StatefulSet) bool {
 	return deployment.Spec.Replicas != nil &&
 		*deployment.Spec.Replicas == deployment.Status.ReadyReplicas &&
 		*deployment.Spec.Replicas == deployment.Status.UpdatedReplicas &&
-		deployment.Generation == deployment.Status.ObservedGeneration
+		deployment.Generation == deployment.Status.ObservedGeneration &&
+		deployment.Status.CurrentRevision == deployment.Status.UpdateRevision
 }
