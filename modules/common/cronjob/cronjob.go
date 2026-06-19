@@ -21,10 +21,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
@@ -53,7 +55,10 @@ func (cj *CronJob) CreateOrPatch(
 	cronjob := &batchv1.CronJob{}
 	cronjob.ObjectMeta = cj.cronjob.ObjectMeta
 
+	log := ctrl.Log.WithName("cronjob-debug")
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), cronjob, func() error {
+		beforeU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(cronjob.DeepCopy())
+
 		pod.SetPullPolicyDefaults(&cj.cronjob.Spec.JobTemplate.Spec.Template.Spec)
 
 		existingJSON, err := json.Marshal(cronjob.Spec)
@@ -75,6 +80,12 @@ func (cj *CronJob) CreateOrPatch(
 		err = controllerutil.SetControllerReference(h.GetBeforeObject(), cronjob, h.GetScheme())
 		if err != nil {
 			return err
+		}
+
+		afterU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(cronjob.DeepCopy())
+		if !reflect.DeepEqual(beforeU, afterU) {
+			diffFields := findCronJobDiff("", beforeU, afterU)
+			log.Info("DEBUG unstructured diff inside mutate", "cronjob", cj.cronjob.Name, "diffs", diffFields)
 		}
 
 		return nil
@@ -144,4 +155,56 @@ func GetCronJobByName(
 	}
 
 	return cj, nil
+}
+
+func findCronJobDiff(prefix string, a, b interface{}) []string {
+	switch av := a.(type) {
+	case map[string]interface{}:
+		bv, ok := b.(map[string]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: map vs %T", prefix, b)}
+		}
+		var diffs []string
+		allKeys := map[string]bool{}
+		for k := range av {
+			allKeys[k] = true
+		}
+		for k := range bv {
+			allKeys[k] = true
+		}
+		for k := range allKeys {
+			path := prefix + "." + k
+			va, oka := av[k]
+			vb, okb := bv[k]
+			if !oka {
+				diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
+			} else if !okb {
+				diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
+			} else if !reflect.DeepEqual(va, vb) {
+				diffs = append(diffs, findCronJobDiff(path, va, vb)...)
+			}
+		}
+		return diffs
+	case []interface{}:
+		bv, ok := b.([]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: slice vs %T", prefix, b)}
+		}
+		if len(av) != len(bv) {
+			return []string{fmt.Sprintf("LEN %s: %d -> %d", prefix, len(av), len(bv))}
+		}
+		var diffs []string
+		for i := range av {
+			path := fmt.Sprintf("%s[%d]", prefix, i)
+			if !reflect.DeepEqual(av[i], bv[i]) {
+				diffs = append(diffs, findCronJobDiff(path, av[i], bv[i])...)
+			}
+		}
+		return diffs
+	default:
+		if !reflect.DeepEqual(a, b) {
+			return []string{fmt.Sprintf("CHANGED %s: %v -> %v", prefix, a, b)}
+		}
+		return nil
+	}
 }

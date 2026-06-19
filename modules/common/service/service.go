@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -307,7 +309,10 @@ func (s *Service) CreateOrPatch(
 		},
 	}
 
+	log := ctrl.Log.WithName("service-debug")
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), service, func() error {
+		beforeU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(service.DeepCopy())
+
 		service.Labels = util.MergeStringMaps(s.service.Labels, service.Labels)
 		service.Annotations = util.MergeStringMaps(s.service.Annotations, service.Annotations)
 
@@ -347,6 +352,12 @@ func (s *Service) CreateOrPatch(
 		err = controllerutil.SetControllerReference(h.GetBeforeObject(), service, h.GetScheme())
 		if err != nil {
 			return err
+		}
+
+		afterU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(service.DeepCopy())
+		if !reflect.DeepEqual(beforeU, afterU) {
+			diffFields := findServiceDiff("", beforeU, afterU)
+			log.Info("DEBUG unstructured diff inside mutate", "service", s.service.Name, "diffs", diffFields)
 		}
 
 		return nil
@@ -494,4 +505,56 @@ func EndptProtocol(proto *Protocol) string {
 	}
 
 	return string(*proto) + "://"
+}
+
+func findServiceDiff(prefix string, a, b interface{}) []string {
+	switch av := a.(type) {
+	case map[string]interface{}:
+		bv, ok := b.(map[string]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: map vs %T", prefix, b)}
+		}
+		var diffs []string
+		allKeys := map[string]bool{}
+		for k := range av {
+			allKeys[k] = true
+		}
+		for k := range bv {
+			allKeys[k] = true
+		}
+		for k := range allKeys {
+			path := prefix + "." + k
+			va, oka := av[k]
+			vb, okb := bv[k]
+			if !oka {
+				diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
+			} else if !okb {
+				diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
+			} else if !reflect.DeepEqual(va, vb) {
+				diffs = append(diffs, findServiceDiff(path, va, vb)...)
+			}
+		}
+		return diffs
+	case []interface{}:
+		bv, ok := b.([]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: slice vs %T", prefix, b)}
+		}
+		if len(av) != len(bv) {
+			return []string{fmt.Sprintf("LEN %s: %d -> %d", prefix, len(av), len(bv))}
+		}
+		var diffs []string
+		for i := range av {
+			path := fmt.Sprintf("%s[%d]", prefix, i)
+			if !reflect.DeepEqual(av[i], bv[i]) {
+				diffs = append(diffs, findServiceDiff(path, av[i], bv[i])...)
+			}
+		}
+		return diffs
+	default:
+		if !reflect.DeepEqual(a, b) {
+			return []string{fmt.Sprintf("CHANGED %s: %v -> %v", prefix, a, b)}
+		}
+		return nil
+	}
 }
