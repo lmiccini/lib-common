@@ -325,14 +325,24 @@ func (s *Service) CreateOrPatch(
 		}
 		s.service.Spec.ClusterIPs = service.Spec.ClusterIPs
 
-		// Use strategic merge patch to apply the desired spec onto
-		// the existing spec. This preserves all server-defaulted
-		// fields automatically (ExternalTrafficPolicy, NodePort,
-		// AllocateLoadBalancerNodePorts, SessionAffinity, IPFamilyPolicy,
-		// InternalTrafficPolicy, etc.).
-		// Ports are merged by port number via Kubernetes patch strategy
-		// tags, preserving per-port server defaults like TargetPort
-		// and NodePort.
+		// TargetPort is an IntOrString whose zero value (0) is not
+		// omitted by JSON omitempty (custom marshaler). Copy the
+		// existing TargetPort into the desired spec when the operator
+		// didn't set it, so the strategic merge sees them as identical.
+		existingPortsByKey := make(map[string]corev1.ServicePort)
+		for _, p := range service.Spec.Ports {
+			existingPortsByKey[fmt.Sprintf("%d/%s", p.Port, p.Protocol)] = p
+		}
+		for i := range s.service.Spec.Ports {
+			dp := &s.service.Spec.Ports[i]
+			if dp.TargetPort.IntValue() == 0 && dp.TargetPort.String() == "0" {
+				key := fmt.Sprintf("%d/%s", dp.Port, dp.Protocol)
+				if ep, ok := existingPortsByKey[key]; ok {
+					dp.TargetPort = ep.TargetPort
+				}
+			}
+		}
+
 		existingJSON, err := json.Marshal(service.Spec)
 		if err != nil {
 			return fmt.Errorf("marshal existing Service spec: %w", err)
