@@ -320,7 +320,11 @@ func (s *Service) CreateOrPatch(
 		// future, they are preserved without code changes here.
 		service.Spec.Selector = s.service.Spec.Selector
 		service.Spec.Type = s.service.Spec.Type
-		service.Spec.ClusterIP = s.service.Spec.ClusterIP
+		// ClusterIP is immutable after creation and server-assigned;
+		// never overwrite it from the desired spec.
+		if service.Spec.ClusterIP == "" {
+			service.Spec.ClusterIP = s.service.Spec.ClusterIP
+		}
 		service.Spec.PublishNotReadyAddresses = s.service.Spec.PublishNotReadyAddresses
 		service.Spec.ExternalTrafficPolicy = s.service.Spec.ExternalTrafficPolicy
 		service.Spec.LoadBalancerClass = s.service.Spec.LoadBalancerClass
