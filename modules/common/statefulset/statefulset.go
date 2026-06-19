@@ -20,6 +20,7 @@ package statefulset
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
@@ -28,6 +29,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -56,7 +58,10 @@ func (s *StatefulSet) CreateOrPatch(
 		},
 	}
 
+	log := ctrl.Log.WithName("statefulset-debug")
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), statefulset, func() error {
+		beforeU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(statefulset.DeepCopy())
+
 		statefulset.Labels = util.MergeStringMaps(statefulset.Labels, s.statefulset.Labels)
 		statefulset.Annotations = util.MergeStringMaps(statefulset.Annotations, s.statefulset.Annotations)
 
@@ -95,7 +100,18 @@ func (s *StatefulSet) CreateOrPatch(
 			s.statefulset.Spec.Template.Spec.InitContainers,
 		)
 
-		return controllerutil.SetControllerReference(h.GetBeforeObject(), statefulset, h.GetScheme())
+		err := controllerutil.SetControllerReference(h.GetBeforeObject(), statefulset, h.GetScheme())
+		if err != nil {
+			return err
+		}
+
+		afterU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(statefulset.DeepCopy())
+		if !reflect.DeepEqual(beforeU, afterU) {
+			diffFields := findUnstructuredDiff("", beforeU, afterU)
+			log.Info("DEBUG unstructured diff inside mutate", "statefulset", s.statefulset.Name, "diffs", diffFields)
+		}
+
+		return nil
 	})
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
@@ -161,6 +177,36 @@ func (s *StatefulSet) Delete(
 	}
 
 	return nil
+}
+
+func findUnstructuredDiff(prefix string, a, b map[string]interface{}) []string {
+	var diffs []string
+	allKeys := map[string]bool{}
+	for k := range a {
+		allKeys[k] = true
+	}
+	for k := range b {
+		allKeys[k] = true
+	}
+	for k := range allKeys {
+		path := prefix + "." + k
+		va, oka := a[k]
+		vb, okb := b[k]
+		if !oka {
+			diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
+		} else if !okb {
+			diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
+		} else if !reflect.DeepEqual(va, vb) {
+			ma, aIsMap := va.(map[string]interface{})
+			mb, bIsMap := vb.(map[string]interface{})
+			if aIsMap && bIsMap {
+				diffs = append(diffs, findUnstructuredDiff(path, ma, mb)...)
+			} else {
+				diffs = append(diffs, fmt.Sprintf("CHANGED %s: %v -> %v", path, va, vb))
+			}
+		}
+	}
+	return diffs
 }
 
 // IsReady - validates when deployment is ready deployed to whats being requested
