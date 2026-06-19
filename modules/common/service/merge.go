@@ -22,9 +22,9 @@ import (
 
 // MergeServicePorts merges desired service port specs into existing ports
 // matched by name. It starts from the desired port and preserves only the
-// server-defaulted fields (Protocol, TargetPort) from the existing port when
-// the desired spec doesn't explicitly set them. All other fields come from the
-// desired spec.
+// server-defaulted fields (Protocol, TargetPort, NodePort) from the existing
+// port when the desired spec doesn't explicitly set them. All other fields
+// come from the desired spec.
 //
 // When port counts differ or a desired port name is not found in existing, the
 // existing slice is replaced with the desired ports.
@@ -52,6 +52,9 @@ func MergeServicePorts(existing *[]corev1.ServicePort, desired []corev1.ServiceP
 		}
 		if d.TargetPort.IntValue() == 0 && d.TargetPort.StrVal == "" {
 			d.TargetPort = (*existing)[idx].TargetPort
+		}
+		if d.NodePort == 0 {
+			d.NodePort = (*existing)[idx].NodePort
 		}
 		(*existing)[idx] = d
 	}
