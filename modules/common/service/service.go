@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -307,7 +309,10 @@ func (s *Service) CreateOrPatch(
 		},
 	}
 
+	log := ctrl.Log.WithName("service-debug")
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), service, func() error {
+		beforeU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(service.DeepCopy())
+
 		service.Labels = util.MergeStringMaps(s.service.Labels, service.Labels)
 		service.Annotations = util.MergeStringMaps(s.service.Annotations, service.Annotations)
 
@@ -340,6 +345,12 @@ func (s *Service) CreateOrPatch(
 		err := controllerutil.SetControllerReference(h.GetBeforeObject(), service, h.GetScheme())
 		if err != nil {
 			return err
+		}
+
+		afterU, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(service.DeepCopy())
+		if !reflect.DeepEqual(beforeU, afterU) {
+			diffFields := findUnstructuredDiff("", beforeU, afterU)
+			log.Info("DEBUG unstructured diff inside mutate", "service", s.service.Name, "diffs", diffFields)
 		}
 
 		return nil
@@ -475,6 +486,36 @@ func GetServicesPortDetails(
 	}
 
 	return nil
+}
+
+func findUnstructuredDiff(prefix string, a, b map[string]interface{}) []string {
+	var diffs []string
+	allKeys := map[string]bool{}
+	for k := range a {
+		allKeys[k] = true
+	}
+	for k := range b {
+		allKeys[k] = true
+	}
+	for k := range allKeys {
+		path := prefix + "." + k
+		va, oka := a[k]
+		vb, okb := b[k]
+		if !oka {
+			diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
+		} else if !okb {
+			diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
+		} else if !reflect.DeepEqual(va, vb) {
+			ma, aIsMap := va.(map[string]interface{})
+			mb, bIsMap := vb.(map[string]interface{})
+			if aIsMap && bIsMap {
+				diffs = append(diffs, findUnstructuredDiff(path, ma, mb)...)
+			} else {
+				diffs = append(diffs, fmt.Sprintf("CHANGED %s: %v -> %v", path, va, vb))
+			}
+		}
+	}
+	return diffs
 }
 
 // EndptProtocol returns the protocol for the endpoint if proto is nil http is considered
