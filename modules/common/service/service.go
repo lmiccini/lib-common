@@ -311,37 +311,40 @@ func (s *Service) CreateOrPatch(
 		service.Labels = util.MergeStringMaps(s.service.Labels, service.Labels)
 		service.Annotations = util.MergeStringMaps(s.service.Annotations, service.Annotations)
 
-		// Copy only operator-controlled fields from the desired spec.
-		// The existing spec is kept as the base so that
-		// server-defaulted fields (e.g. SessionAffinity,
-		// IPFamilyPolicy, InternalTrafficPolicy, ClusterIPs) are
-		// preserved automatically, avoiding unnecessary reconcile
-		// loops. If Kubernetes adds new defaulted fields in the
-		// future, they are preserved without code changes here.
-		service.Spec.Selector = s.service.Spec.Selector
-		service.Spec.Type = s.service.Spec.Type
-		// ClusterIP is immutable after creation and server-assigned;
-		// never overwrite it from the desired spec.
-		if service.Spec.ClusterIP == "" {
-			service.Spec.ClusterIP = s.service.Spec.ClusterIP
+		// ClusterIP is immutable and server-assigned. Preserve
+		// the existing value by copying it into the desired spec
+		// before the strategic merge, so the merge sees them as
+		// identical and leaves them untouched.
+		if service.Spec.ClusterIP != "" {
+			s.service.Spec.ClusterIP = service.Spec.ClusterIP
 		}
-		service.Spec.PublishNotReadyAddresses = s.service.Spec.PublishNotReadyAddresses
-		if s.service.Spec.ExternalTrafficPolicy != "" {
-			service.Spec.ExternalTrafficPolicy = s.service.Spec.ExternalTrafficPolicy
+		s.service.Spec.ClusterIPs = service.Spec.ClusterIPs
+
+		// Use strategic merge patch to apply the desired spec onto
+		// the existing spec. This preserves all server-defaulted
+		// fields automatically (ExternalTrafficPolicy, NodePort,
+		// AllocateLoadBalancerNodePorts, SessionAffinity, IPFamilyPolicy,
+		// InternalTrafficPolicy, etc.).
+		// Ports are merged by port number via Kubernetes patch strategy
+		// tags, preserving per-port server defaults like TargetPort
+		// and NodePort.
+		existingJSON, err := json.Marshal(service.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal existing Service spec: %w", err)
 		}
-		service.Spec.LoadBalancerClass = s.service.Spec.LoadBalancerClass
-		service.Spec.LoadBalancerSourceRanges = s.service.Spec.LoadBalancerSourceRanges
-		if s.service.Spec.AllocateLoadBalancerNodePorts != nil {
-			service.Spec.AllocateLoadBalancerNodePorts = s.service.Spec.AllocateLoadBalancerNodePorts
+		desiredJSON, err := json.Marshal(s.service.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal desired Service spec: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(existingJSON, desiredJSON, corev1.ServiceSpec{})
+		if err != nil {
+			return fmt.Errorf("strategic merge Service spec: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &service.Spec); err != nil {
+			return fmt.Errorf("unmarshal patched Service spec: %w", err)
 		}
 
-		// Merge ports by name to preserve server-defaulted fields
-		// (e.g. TargetPort, Protocol) and avoid unnecessary reconcile
-		// loops. Falls back to full replacement if port sets don't
-		// match by name.
-		MergeServicePorts(&service.Spec.Ports, s.service.Spec.Ports)
-
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), service, h.GetScheme())
+		err = controllerutil.SetControllerReference(h.GetBeforeObject(), service, h.GetScheme())
 		if err != nil {
 			return err
 		}

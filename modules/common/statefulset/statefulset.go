@@ -19,6 +19,7 @@ package statefulset
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
@@ -71,62 +73,32 @@ func (s *StatefulSet) CreateOrPatch(
 			s.statefulset.Spec.VolumeClaimTemplates = statefulset.Spec.VolumeClaimTemplates
 		}
 
-		// Save existing state before the full Spec overwrite so we can
-		// restore server-defaulted fields afterward.
-		existingSpec := statefulset.Spec
-		existingPodSpec := statefulset.Spec.Template.Spec
+		pod.SetPullPolicyDefaults(&s.statefulset.Spec.Template.Spec)
 
-		statefulset.Spec = s.statefulset.Spec
+		// Use strategic merge patch to apply the desired spec onto the
+		// existing spec. This preserves all server-defaulted fields
+		// automatically: fields the operator doesn't set (zero value,
+		// omitted by JSON omitempty) are kept from the existing object.
+		// Containers and volumes are merged by name via Kubernetes patch
+		// strategy tags, preserving per-element server defaults like
+		// terminationMessagePath, defaultMode, etc.
+		existingJSON, err := json.Marshal(statefulset.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal existing StatefulSet spec: %w", err)
+		}
+		desiredJSON, err := json.Marshal(s.statefulset.Spec)
+		if err != nil {
+			return fmt.Errorf("marshal desired StatefulSet spec: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(existingJSON, desiredJSON, appsv1.StatefulSetSpec{})
+		if err != nil {
+			return fmt.Errorf("strategic merge StatefulSet spec: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &statefulset.Spec); err != nil {
+			return fmt.Errorf("unmarshal patched StatefulSet spec: %w", err)
+		}
 
-		pod.SetPullPolicyDefaults(&statefulset.Spec.Template.Spec)
-
-		// Restore server-defaulted StatefulSet-level fields.
-		if statefulset.Spec.PodManagementPolicy == "" {
-			statefulset.Spec.PodManagementPolicy = existingSpec.PodManagementPolicy
-		}
-		if statefulset.Spec.UpdateStrategy.Type == "" {
-			statefulset.Spec.UpdateStrategy = existingSpec.UpdateStrategy
-		}
-		if statefulset.Spec.RevisionHistoryLimit == nil {
-			statefulset.Spec.RevisionHistoryLimit = existingSpec.RevisionHistoryLimit
-		}
-		if statefulset.Spec.PersistentVolumeClaimRetentionPolicy == nil {
-			statefulset.Spec.PersistentVolumeClaimRetentionPolicy = existingSpec.PersistentVolumeClaimRetentionPolicy
-		}
-
-		// Restore server-defaulted pod-level fields.
-		ps := &statefulset.Spec.Template.Spec
-		if ps.RestartPolicy == "" {
-			ps.RestartPolicy = existingPodSpec.RestartPolicy
-		}
-		if ps.DNSPolicy == "" {
-			ps.DNSPolicy = existingPodSpec.DNSPolicy
-		}
-		if ps.TerminationGracePeriodSeconds == nil {
-			ps.TerminationGracePeriodSeconds = existingPodSpec.TerminationGracePeriodSeconds
-		}
-		if ps.SchedulerName == "" {
-			ps.SchedulerName = existingPodSpec.SchedulerName
-		}
-		if ps.SecurityContext == nil {
-			ps.SecurityContext = existingPodSpec.SecurityContext
-		}
-		// DeprecatedServiceAccount is a server-set alias for ServiceAccountName.
-		ps.DeprecatedServiceAccount = existingPodSpec.DeprecatedServiceAccount
-
-		// Merge containers/initContainers by name to preserve
-		// server-defaulted fields (TerminationMessagePath, etc.).
-		ps.Containers = existingPodSpec.Containers
-		MergeContainersByName(&ps.Containers, s.statefulset.Spec.Template.Spec.Containers)
-		ps.InitContainers = existingPodSpec.InitContainers
-		MergeContainersByName(&ps.InitContainers, s.statefulset.Spec.Template.Spec.InitContainers)
-
-		// Merge volumes by name to preserve server-defaulted fields
-		// (defaultMode, hostPath type).
-		ps.Volumes = existingPodSpec.Volumes
-		MergeVolumesByName(&ps.Volumes, s.statefulset.Spec.Template.Spec.Volumes)
-
-		err := controllerutil.SetControllerReference(h.GetBeforeObject(), statefulset, h.GetScheme())
+		err = controllerutil.SetControllerReference(h.GetBeforeObject(), statefulset, h.GetScheme())
 		if err != nil {
 			return err
 		}
@@ -205,34 +177,56 @@ func (s *StatefulSet) Delete(
 	return nil
 }
 
-func findUnstructuredDiff(prefix string, a, b map[string]interface{}) []string {
-	var diffs []string
-	allKeys := map[string]bool{}
-	for k := range a {
-		allKeys[k] = true
-	}
-	for k := range b {
-		allKeys[k] = true
-	}
-	for k := range allKeys {
-		path := prefix + "." + k
-		va, oka := a[k]
-		vb, okb := b[k]
-		if !oka {
-			diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
-		} else if !okb {
-			diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
-		} else if !reflect.DeepEqual(va, vb) {
-			ma, aIsMap := va.(map[string]interface{})
-			mb, bIsMap := vb.(map[string]interface{})
-			if aIsMap && bIsMap {
-				diffs = append(diffs, findUnstructuredDiff(path, ma, mb)...)
-			} else {
-				diffs = append(diffs, fmt.Sprintf("CHANGED %s: %v -> %v", path, va, vb))
+func findUnstructuredDiff(prefix string, a, b interface{}) []string {
+	switch av := a.(type) {
+	case map[string]interface{}:
+		bv, ok := b.(map[string]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: map vs %T", prefix, b)}
+		}
+		var diffs []string
+		allKeys := map[string]bool{}
+		for k := range av {
+			allKeys[k] = true
+		}
+		for k := range bv {
+			allKeys[k] = true
+		}
+		for k := range allKeys {
+			path := prefix + "." + k
+			va, oka := av[k]
+			vb, okb := bv[k]
+			if !oka {
+				diffs = append(diffs, fmt.Sprintf("ADDED %s: %v", path, vb))
+			} else if !okb {
+				diffs = append(diffs, fmt.Sprintf("REMOVED %s: %v", path, va))
+			} else if !reflect.DeepEqual(va, vb) {
+				diffs = append(diffs, findUnstructuredDiff(path, va, vb)...)
 			}
 		}
+		return diffs
+	case []interface{}:
+		bv, ok := b.([]interface{})
+		if !ok {
+			return []string{fmt.Sprintf("TYPE %s: slice vs %T", prefix, b)}
+		}
+		if len(av) != len(bv) {
+			return []string{fmt.Sprintf("LEN %s: %d -> %d", prefix, len(av), len(bv))}
+		}
+		var diffs []string
+		for i := range av {
+			path := fmt.Sprintf("%s[%d]", prefix, i)
+			if !reflect.DeepEqual(av[i], bv[i]) {
+				diffs = append(diffs, findUnstructuredDiff(path, av[i], bv[i])...)
+			}
+		}
+		return diffs
+	default:
+		if !reflect.DeepEqual(a, b) {
+			return []string{fmt.Sprintf("CHANGED %s: %v -> %v", prefix, a, b)}
+		}
+		return nil
 	}
-	return diffs
 }
 
 // IsReady - validates when deployment is ready deployed to whats being requested
