@@ -307,7 +307,11 @@ func (s *Service) CreateOrPatch(
 		},
 	}
 
+	var existingSpecJSON []byte
+
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), service, func() error {
+		existingSpecJSON, _ = json.Marshal(service)
+
 		service.Labels = util.MergeStringMaps(s.service.Labels, service.Labels)
 		service.Annotations = util.MergeStringMaps(s.service.Annotations, service.Annotations)
 
@@ -352,7 +356,8 @@ func (s *Service) CreateOrPatch(
 		return ctrl.Result{}, err
 	}
 	if op != controllerutil.OperationResultNone {
-		h.GetLogger().Info(fmt.Sprintf("Service %s - %s", service.Name, op))
+		mutatedJSON, _ := json.Marshal(service)
+		h.GetLogger().Info(fmt.Sprintf("Service %s - %s\n  BEFORE: %s\n  AFTER:  %s", service.Name, op, string(existingSpecJSON), string(mutatedJSON)))
 	}
 
 	// update the service instance with the ip/host information
