@@ -17,6 +17,7 @@ limitations under the License.
 package object
 
 import (
+	"context"
 	"testing"
 
 	. "github.com/onsi/gomega" // nolint:revive
@@ -69,6 +70,59 @@ func TestCheckOwnerRefExist(t *testing.T) {
 			g := NewWithT(t)
 
 			g.Expect(CheckOwnerRefExist(tt.uid, tt.ownerRefs)).To(BeIdenticalTo(tt.want))
+		})
+	}
+}
+
+func TestFinalizeSecretRotation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		statusSecret  string
+		currentSecret string
+		guardReady    bool
+		wantSecret    string
+		wantErr       bool
+	}{
+		{
+			name:          "no rotation - empty status",
+			statusSecret:  "",
+			currentSecret: "new-secret",
+			guardReady:    true,
+			wantSecret:    "new-secret",
+		},
+		{
+			name:          "no rotation - same secret",
+			statusSecret:  "same-secret",
+			currentSecret: "same-secret",
+			guardReady:    true,
+			wantSecret:    "same-secret",
+		},
+		{
+			name:          "rotation in progress - guard not ready",
+			statusSecret:  "old-secret",
+			currentSecret: "new-secret",
+			guardReady:    false,
+			wantSecret:    "old-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			got, err := FinalizeSecretRotation(
+				ctx, nil, "openstack",
+				tt.statusSecret, tt.currentSecret,
+				"openstack.org/test-consumer",
+				tt.guardReady,
+			)
+
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(got).To(Equal(tt.wantSecret))
 		})
 	}
 }

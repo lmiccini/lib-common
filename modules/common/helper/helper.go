@@ -31,6 +31,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,8 +48,36 @@ type Helper struct {
 	after        *unstructured.Unstructured
 	changes      map[string]bool
 	finalizer    string
+	apiReader    client.Reader
 
 	logger logr.Logger
+}
+
+// SetAPIReader stores a cache-bypassing reader (typically from
+// mgr.GetAPIReader()) for use by EnsureFresh. This must be called
+// before the first reconcile if EnsureFresh is needed.
+func (h *Helper) SetAPIReader(r client.Reader) {
+	h.apiReader = r
+}
+
+// EnsureFresh re-reads obj directly from the API server when op is
+// OperationResultNone and refreshNeeded is true. When CreateOrPatch
+// returns op!=None, the returned object already reflects the server
+// state (fresh), so no extra read is needed. When op==None the object
+// comes from the informer cache, which may be stale — this matters
+// during transport-secret rotation where the parent must see accurate
+// sub-CR conditions before removing the old secret's finalizer.
+func (h *Helper) EnsureFresh(ctx context.Context, op controllerutil.OperationResult, obj client.Object, refreshNeeded bool) error {
+	if !refreshNeeded {
+		return nil
+	}
+	if op != controllerutil.OperationResultNone {
+		return nil
+	}
+	if h.apiReader == nil {
+		return nil
+	}
+	return h.apiReader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 }
 
 // NewHelper returns an initialized Helper.
